@@ -108,6 +108,7 @@ public:
     , xrtDevice_(nullptr)
     , xrtKernel_(nullptr)
   #endif
+    , xrt_mem_group_(0)
   {}
 
   ~vx_device() {
@@ -150,6 +151,16 @@ public:
     auto xrtKernel = xrt::ip(xrtDevice, uuid, KERNEL_NAME);
     auto xclbin = xrt::xclbin(xlbin_path_s);
     auto device_name = xrtDevice.get_info<xrt::info::device::name>();
+
+    // Find the first used DDR memory group in the xclbin
+    xrt_mem_group_ = 0;
+    for (auto& mem : xclbin.get_mems()) {
+      if (mem.get_used()) {
+        xrt_mem_group_ = mem.get_index();
+        break;
+      }
+    }
+    printf("info: using XRT memory group %u\n", xrt_mem_group_);
 
   #else
 
@@ -223,18 +234,42 @@ public:
 
     printf("info: device name=%s, memory_capacity=0x%lx bytes, memory_banks=%ld.\n", device_name.c_str(), global_mem_size_, num_banks);
 
+    // Tier-0 (>8GB single-DDR[0]): the kernel stack (grows down from STACK_BASE,
+    // in DRAM) and the LMEM decode window (at LMEM_BASE, routed on-chip) sit at
+    // ~8GB, now inside the enlarged allocatable range. Reserve that band so the
+    // first-fit allocator never hands it out to a data buffer (which would be
+    // corrupted by stack writes / silently shadowed to on-chip LMEM). No-op on builds where
+    // the band lies at/above the cap (e.g. the legacy 8GB layout).
+    {
+      uint64_t nt = 0, nw = 0, nc = 0;
+      this->get_caps(VX_CAPS_NUM_THREADS, &nt);
+      this->get_caps(VX_CAPS_NUM_WARPS,   &nw);
+      this->get_caps(VX_CAPS_NUM_CORES,   &nc);
+      uint64_t harts    = (nt ? nt : 1) * (nw ? nw : 1) * (nc ? nc : 1);
+      uint64_t stack_sz = harts << STACK_LOG2_SIZE;
+      uint64_t band_lo  = (uint64_t)STACK_BASE_ADDR - stack_sz;
+      uint64_t band_hi  = (uint64_t)LMEM_BASE_ADDR + (1ull << LMEM_LOG_SIZE);
+      if (band_lo >= (uint64_t)ALLOC_BASE_ADDR && band_hi <= (uint64_t)GLOBAL_MEM_SIZE) {
+        if (0 == global_mem_.reserve(band_lo, band_hi - band_lo)) {
+          printf("info: reserved stack/LMEM band [0x%lx, 0x%lx) for %lu harts\n",
+                 band_lo, band_hi, harts);
+        }
+      }
+    }
+
   #ifdef BANK_INTERLEAVE
-    xrtBuffers_.reserve(num_banks);
-    for (uint32_t i = 0; i < num_banks; ++i) {
+    xrtBuffers_.reserve(1);
+    {
+      uint32_t i = 0;
     #ifdef CPP_API
-      xrtBuffers_.emplace_back(xrtDevice_, bank_size, xrt::bo::flags::normal, i);
+      xrtBuffers_.emplace_back(xrtDevice_, (uint64_t)GLOBAL_MEM_SIZE, xrt::bo::flags::normal, xrt_mem_group_);
     #else
-      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, i), {
+      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, (uint64_t)GLOBAL_MEM_SIZE, XRT_BO_FLAGS_NONE, xrt_mem_group_), {
          return -1;
       });
       xrtBuffers_.push_back(xrtBuffer);
     #endif
-      printf("*** allocated bank%u/%u, size=%lu\n", i, num_banks, bank_size);
+      printf("*** allocated mem_group=%u, size=%lu\n", xrt_mem_group_, (uint64_t)GLOBAL_MEM_SIZE);
     }
   #endif
 
@@ -538,8 +573,16 @@ public:
         return err;
       });
     #ifdef CPP_API
-      xrtBuffer.write(host_ptr, size, bo_offset);
-      xrtBuffer.sync(XCL_BO_SYNC_BO_TO_DEVICE, size, bo_offset);
+      // xrt::bo::write/sync throw on failure; convert to an error return so a
+      // failed transfer never aborts the whole process (matches the C-API branch).
+      try {
+        xrtBuffer.write(host_ptr, size, bo_offset);
+        xrtBuffer.sync(XCL_BO_SYNC_BO_TO_DEVICE, size, bo_offset);
+      } catch (const std::exception& e) {
+        printf("[VXDRV] Error: BO write/sync-to-device failed (bo_offset=0x%lx size=0x%lx): %s\n",
+               bo_offset, size, e.what());
+        return -1;
+      }
     #else
       CHECK_ERR(xrtBOWrite(xrtBuffer, host_ptr, size, bo_offset), {
         dump_xrt_error(xrtDevice_, err);
@@ -584,8 +627,20 @@ public:
         return err;
       });
     #ifdef CPP_API
-      xrtBuffer.sync(XCL_BO_SYNC_BO_FROM_DEVICE, size, bo_offset);
-      xrtBuffer.read(host_ptr, size, bo_offset);
+      // xrt::bo::sync/read throw on failure; convert to an error return so a
+      // failed transfer never aborts the whole process (matches the C-API branch).
+      // Notably this download() serves the MPM/perf read from vx_dev_close ->
+      // vx_dump_perf: when all user buffers were freed, get_buffer lazily
+      // re-allocates a pristine bank BO whose FROM_DEVICE sync XRT rejects
+      // ("Invalid argument"). Returning -1 lets vx_dump_perf skip gracefully.
+      try {
+        xrtBuffer.sync(XCL_BO_SYNC_BO_FROM_DEVICE, size, bo_offset);
+        xrtBuffer.read(host_ptr, size, bo_offset);
+      } catch (const std::exception& e) {
+        printf("[VXDRV] Error: BO sync-from-device/read failed (bo_offset=0x%lx size=0x%lx): %s\n",
+               bo_offset, size, e.what());
+        return -1;
+      }
     #else
       CHECK_ERR(xrtBOSync(xrtBuffer, XCL_BO_SYNC_BO_FROM_DEVICE, size, bo_offset), {
         dump_xrt_error(xrtDevice_, err);
@@ -601,6 +656,8 @@ public:
   }
 
   int start(uint64_t krnl_addr, uint64_t args_addr) {
+    printf("start: krnl_addr=0x%lx, args_addr=0x%lx\n", krnl_addr, args_addr);
+    fflush(stdout);
     // set kernel info
     CHECK_ERR(this->dcr_write(VX_DCR_BASE_STARTUP_ADDR0, krnl_addr & 0xffffffff), {
       return err;
@@ -615,10 +672,40 @@ public:
       return err;
     });
 
+    // Wait for any stale AP_DONE from a previous run to clear before writing AP_START.
+    // If AP_DONE=1 is present when AP_START is written, the Vortex AFU interprets it
+    // as "acknowledge done → go idle" rather than starting a new execution.
+    {
+      uint32_t status = 0;
+      for (int i = 0; i < 10; ++i) {
+        this->read_register(MMIO_CTL_ADDR, &status);
+        if (!(status & CTL_AP_DONE))
+          break;
+        printf("start: waiting for stale AP_DONE to clear (AP_CTL=0x%02x)...\n", status);
+        fflush(stdout);
+        struct timespec ts = {0, 1000000};  // 1 ms
+        nanosleep(&ts, nullptr);
+      }
+      if (status & CTL_AP_DONE) {
+        // Force-clear by writing AP_RESTART which acknowledges done without starting
+        this->write_register(MMIO_CTL_ADDR, CTL_AP_RESTART);
+        struct timespec ts2 = {0, 1000000};
+        nanosleep(&ts2, nullptr);
+      }
+    }
+
     // start execution
+    printf("start: writing AP_START=0x%x to MMIO_CTL_ADDR=0x%x\n", CTL_AP_START, MMIO_CTL_ADDR);
     CHECK_ERR(this->write_register(MMIO_CTL_ADDR, CTL_AP_START), {
       return err;
     });
+    printf("start: AP_START written\n");
+    {
+      uint32_t status = 0;
+      this->read_register(MMIO_CTL_ADDR, &status);
+      printf("start: AP_CTL status after AP_START = 0x%x (idle=%d done=%d start=%d)\n",
+             status, (status>>2)&1, (status>>1)&1, status&1);
+    }
 
     // clear mpm cache
     mpm_cache_.clear();
@@ -627,31 +714,42 @@ public:
   }
 
   int ready_wait(uint64_t timeout) {
-    struct timespec sleep_time;
-  #ifndef NDEBUG
-    sleep_time.tv_sec = 1;
-    sleep_time.tv_nsec = 0;
-  #else
-    sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 1000000;
-  #endif
-
-    // to milliseconds
-    uint64_t sleep_time_ms = (sleep_time.tv_sec * 1000) + (sleep_time.tv_nsec / 1000000);
+    // Poll with exponential backoff (1ms -> 1000ms cap) instead of a flat
+    // 1-second sleep. Most kernel launches in practice complete in well
+    // under a second, so a fixed 1s poll granularity was adding up to
+    // ~1s of pure polling latency per vx_start()/vx_ready_wait() pair --
+    // dominant cost for workloads issuing many small launches (e.g.
+    // an LLM decode with ~90 launches/token: ~90s/token of this
+    // was polling latency, not compute or PCIe transfer time). The 1000ms
+    // cap preserves the original steady-state poll rate (and printf
+    // volume) for genuinely long-running kernels.
+    uint64_t sleep_time_ms = 1;
+    uint64_t elapsed_ms = 0;
 
     for (;;) {
       uint32_t status = 0;
-      CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
-        return err;
-      });
+      try {
+        CHECK_ERR(this->read_register(MMIO_CTL_ADDR, &status), {
+          return err;
+        });
+      } catch (std::exception& e) {
+        printf("ready_wait: read_register threw: %s\n", e.what()); fflush(stdout);
+        throw;
+      }
       bool is_done = (status & CTL_AP_DONE) == CTL_AP_DONE;
       if (is_done)
         break;
-      if (0 == timeout) {
+      if (elapsed_ms >= timeout) {
+        printf("ready_wait: TIMEOUT after %lums\n", elapsed_ms);
         return -1;
       }
+      struct timespec sleep_time;
+      sleep_time.tv_sec = sleep_time_ms / 1000;
+      sleep_time.tv_nsec = (sleep_time_ms % 1000) * 1000000;
       nanosleep(&sleep_time, nullptr);
+      elapsed_ms += sleep_time_ms;
       timeout -= sleep_time_ms;
+      sleep_time_ms = (sleep_time_ms < 500) ? (sleep_time_ms * 2) : 1000;
     };
 
     return 0;
@@ -693,6 +791,7 @@ private:
   xrt_kernel_t xrtKernel_;
   uint64_t dev_caps_;
   uint64_t isa_caps_;
+  uint32_t xrt_mem_group_;
   uint64_t global_mem_size_;
   DeviceConfig dcrs_;
   std::unordered_map<uint32_t, std::array<uint64_t, 32>> mpm_cache_;
@@ -763,12 +862,16 @@ private:
         ++it->second.count;
       }
     } else {
-      printf("allocating bank%d...\n", bank_id);
-      uint64_t bank_size = 1ull << lg2_bank_size_;
+      printf("allocating bank%d (mem_group=%u)...\n", bank_id, xrt_mem_group_);
+      // Cap BO size to the SW allocator range. Physical DDR bank may be 16GB
+      // but all virtual addresses are < GLOBAL_MEM_SIZE, so a GLOBAL_MEM_SIZE
+      // BO covers the entire address range we ever use.
+      uint64_t bank_size = std::min((uint64_t)(1ull << lg2_bank_size_), (uint64_t)GLOBAL_MEM_SIZE);
     #ifdef CPP_API
-      xrt::bo xrtBuffer(xrtDevice_, bank_size, xrt::bo::flags::normal, bank_id);
+      xrt::bo xrtBuffer(xrtDevice_, bank_size, xrt::bo::flags::normal, xrt_mem_group_);
+      printf("  BO allocated: phys_addr=0x%lx, size=0x%lx\n", xrtBuffer.address(), bank_size);
     #else
-      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, bank_id), {
+      CHECK_HANDLE(xrtBuffer, xrtBOAlloc(xrtDevice_, bank_size, XRT_BO_FLAGS_NONE, xrt_mem_group_), {
         return -1;
       });
     #endif

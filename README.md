@@ -1,4 +1,75 @@
-# Vortex GPGPU
+# Purism: In-TCU Dequantization for Quantized-Weight GEMM
+
+Purism extends the tensor core unit (TCU) of the [Vortex](https://github.com/vortexgpgpu/vortex) v2.3 RISC-V GPGPU
+so that quantized-weight GEMM runs without SIMT dequantization instructions.
+
+- An **operand conversion unit (OCU)** on the TCU operand path unpacks and converts the weight (B) operand
+  and subtracts its zero-point.
+- A **partial-sum scaling unit (PSSU)** on the TCU output path applies group scales and accumulates in FP32.
+
+```
+operand collector ─▶ TCU dispatch ─▶ OCU (operand transformer) ─┬─▶ FP PE ─┐
+                                                                 ├─▶ INT PE ─┼─▶ arbiter ─▶ PSSU ─▶ commit
+                                                                 └─▶ bypass ─┘   (SETSCALE/READ/SETZP)
+```
+
+## Instructions (RISC-V custom-0, opcode `0x0B`)
+
+| Instruction | funct7 | funct3 | Operands |
+|---|---|---|---|
+| `WMMA` | 0x02 | 0 | rs1 field = TCU type (FP16 / INT8), rd field = output type, **rs2 field = B source format** (0 = no conversion) |
+| `WMMA.DRAIN` | 0x02 | 1/2 = one-scale bank 0/1, 3/4 = two-scale bank 0/1 | as `WMMA`; the last k-step result (group partial sum) goes to the PSSU |
+| `PSSU.SETSCALE` | 0x03 | 0 | rd field = {bank, weight/activation, slot}, rs1 = F-reg with per-lane scales |
+| `PSSU.READ` | 0x03 | 1 | rd = F-reg ← accumulator entry, then the entry is cleared; rs1 field = entry index |
+| `OT.SETZP` | 0x03 | 2 | rs1 = 64-bit I-reg with per-lane zero-points (8 bits per unpacked B register) |
+
+All of them issue to the TCU, so program order is kept inside the TCU path.
+
+- **OCU**: INT4/UINT4 → INT8, FP8 E4M3, FP16; INT8/UINT8 → FP16; FP8 E4M3/E5M2 → FP16; FP4 E2M1 → FP8 E4M3, FP16.
+  A packed B register is expanded over consecutive micro-ops, so the register file holds up to 4× less B data.
+  Zero-points are per warp, per lane and per unpacked B register.
+- **PSSU**: `Y ← Y + f(P) · Sw · (Sa | 1)` per group partial sum `P`, with an internal FP32 accumulator `Y`,
+  INT32 → FP32 conversion for the INT8 path, and double-banked scales so that the next group's scales load
+  while the current group drains.
+
+## Source map
+
+| Path | Content |
+|---|---|
+| `hw/rtl/tcu/VX_tcu_operand_transformer.sv` | OCU stage |
+| `hw/rtl/tcu/VX_tcu_pssu.sv` | PSSU stage |
+| `hw/rtl/tcu/VX_tcu_unit.sv`, `VX_tcu_uops.sv` | integration, micro-op expansion |
+| `hw/rtl/core/VX_decode.sv`, `VX_uop_sequencer.sv` | instruction decode |
+| `hw/rtl/ocu/` | format converters, zero-point subtraction (`tb_ocu_word.sv`, `tb_ot_formats.sv`) |
+| `hw/rtl/pssu/` | PSSU core: FP32 multiply and round-to-nearest-even add (`tb_pssu_core_v2.sv`) |
+| `tests/regression/qgemm` | W4A16 GEMM kernel (INT4 weights, FP16 activations, per-group scale and zero-point) |
+| `tests/regression/purism_gemm` | GEMM kernel over the source formats (`-DPG_SRC=<format id>`, `-DPG_INT8` for INT8 output) |
+
+## Build and run
+
+Purism is enabled with `-DEXT_TCU_ENABLE -DEXT_PURISM_ENABLE` (the configuration below also uses
+`-DEXT_D_DISABLE -DNUM_THREADS=32 -DNUM_WARPS=4 -DNUM_OPCS=1`). Set up the toolchain as described in
+the upstream section below.
+
+```bash
+# RTL simulation (Verilator)
+CONFIGS="-DEXT_TCU_ENABLE -DEXT_PURISM_ENABLE -DEXT_D_DISABLE -DNUM_THREADS=32 -DNUM_WARPS=4 -DNUM_OPCS=1 -DOPC_DISPATCH_PIPE=1 -DLMEM_DISABLE" \
+  DESTDIR=<rt_dir> XLEN=64 make -C runtime/rtlsim all
+make -C tests/regression/qgemm XLEN=64 CONFIGS="-DNUM_THREADS=32" VORTEX_RT_PATH=<rt_dir>
+cd tests/regression/qgemm && LD_LIBRARY_PATH=<rt_dir> VORTEX_DRIVER=rtlsim ./qgemm -m 16 -n 32 -k 128 -g 128 -Z
+
+# Xilinx Alveo U250 (single core, 100 MHz)
+cd hw/syn/xilinx/xrt
+export CONFIGS="-DEXT_TCU_ENABLE -DEXT_PURISM_ENABLE -DEXT_D_DISABLE -DNUM_THREADS=32 -DNUM_WARPS=4 -DNUM_OPCS=1 -DOPC_DISPATCH_PIPE=2 -DDISPATCH_ACCEL_PIPE=1"
+NT32_SPREAD=1 NT32_BASE_SLR3=1 make NUM_CORES=1 PLATFORM=<u250 .xpfm> KERNEL_FREQ=100 XLEN=64 TARGET=hw PLACE_NO_BUFG=1
+```
+
+`-DLMEM_DISABLE` works around a Verilator 5.028 start-up crash in the local-memory crossbar; the test
+kernels do not use local memory. Omitting `-DEXT_PURISM_ENABLE` builds the same GPU without Purism.
+
+---
+
+# Vortex GPGPU (upstream)
 
 Vortex is a full-stack open-source RISC-V GPGPU. Vortex supports multiple **backend drivers**, including our C++ simulator (simx), an RTL simulator, and physical Xilinx and Altera FPGAs-- all controlled by a single driver script. The chosen driver determines the corresponding code invoked to run Vortex. Generally, developers will prototype their intended design in simx, before completing going forward with an RTL implementation. Alternatively, you can get up and running by selecting a driver of your choice and running a demo program.
 

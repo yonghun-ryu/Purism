@@ -68,7 +68,27 @@ module VX_tcu_uops import
 
     // Register calculations
     wire [4:0] rs1 = TCU_RA + 5'(rs1_offset);
-    wire [4:0] rs2 = TCU_RB + 5'(rs2_offset);
+    // Purism OCU: a packed B register holds 2^LG_PACK native B registers' worth of
+    // source elements (pack factor = dst_bw / src_bw); 2^LG_PACK consecutive uops share
+    // it and step_w tells the OT which slice to expand. b_idx keeps the unpacked offset
+    // (selects the per-register zero point in the OT).
+    wire [3:0] ot_src = ibuf_in.op_args.tcu.ot_src;
+    logic [1:0] lg_pack;
+    always_comb begin
+        if (ot_src == 4'd0) begin
+            lg_pack = 2'd0;
+        end else begin
+            case ({(ot_src == 4'(TCU_I4_ID) || ot_src == 4'(TCU_U4_ID) || ot_src == 4'(TCU_FP4E2M1_ID)), (ibuf_in.op_args.tcu.fmt_s == 4'(TCU_FP16_ID))})
+                2'b11:   lg_pack = 2'd2; // 4-bit -> FP16
+                2'b10:   lg_pack = 2'd1; // 4-bit -> INT8/FP8 E4M3
+                2'b01:   lg_pack = 2'd1; // 8-bit (INT8/FP8) -> FP16
+                default: lg_pack = 2'd0; // 8-bit -> INT8
+            endcase
+        end
+    end
+    wire [CTR_W-1:0] rs2_offset_p = rs2_offset >> lg_pack;
+    wire [1:0]       step_w_w     = 2'(rs2_offset) & ((2'd1 << lg_pack) - 2'd1);
+    wire [4:0] rs2 = TCU_RB + 5'(rs2_offset_p);
     wire [4:0] rs3 = TCU_RC + 5'(rs3_offset);
 
 `ifdef UUID_ENABLE
@@ -88,6 +108,15 @@ module VX_tcu_uops import
     assign ibuf_out.op_args.tcu.fmt_d = ibuf_in.op_args.tcu.fmt_d;
     assign ibuf_out.op_args.tcu.step_m = 4'(m_index);
     assign ibuf_out.op_args.tcu.step_n = 4'(n_index);
+    assign ibuf_out.op_args.tcu.step_w = step_w_w;
+    assign ibuf_out.op_args.tcu.ot_src = ot_src;
+    assign ibuf_out.op_args.tcu.b_idx  = 4'(rs2_offset);
+    assign ibuf_out.op_args.tcu.last_k = (k_index == `UP(LG_K)'(TCU_K_STEPS-1));
+    assign ibuf_out.op_args.tcu.bank      = ibuf_in.op_args.tcu.bank;
+    assign ibuf_out.op_args.tcu.two_scale = ibuf_in.op_args.tcu.two_scale;
+    assign ibuf_out.op_args.tcu.wa        = 1'b0;
+    assign ibuf_out.op_args.tcu.slot      = '0;
+    assign ibuf_out.op_args.tcu.__padding = '0;
     assign ibuf_out.wb        = 1;
     assign ibuf_out.used_rs   = ibuf_in.used_rs;
     assign ibuf_out.rs1       = make_reg_num(REG_TYPE_F, rs1);

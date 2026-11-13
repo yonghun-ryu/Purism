@@ -7,3 +7,16 @@ lint_off -file "@VORTEX_HOME@/third_party/cvfpu/*"
 lint_off -rule BLKANDNBLK -file "@VORTEX_HOME@/third_party/hardfloat/*"
 lint_off -rule UNOPTFLAT -file "@VORTEX_HOME@/third_party/hardfloat/*"
 lint_off -file "@VORTEX_HOME@/third_party/hardfloat/*"
+
+// TIMESCALEMOD: new files (VX_tcu_pkg, VX_ocu_pkg) have `timescale;
+// base Vortex files (VX_socket, VX_cluster, etc.) do not. Suppress globally.
+lint_off -rule TIMESCALEMOD
+
+// VX_tcu_pkg.sv: params/signals unused in some configurations.
+// trace_ex_op op_type/op_args unused in the EXT_TCU_ENABLE=off branch.
+lint_off -rule UNUSEDPARAM -file "@VORTEX_HOME@/hw/rtl/tcu/VX_tcu_pkg.sv"
+lint_off -rule UNUSEDSIGNAL -file "@VORTEX_HOME@/hw/rtl/tcu/VX_tcu_pkg.sv"
+
+// VX_execute_if.sv: data bits unused in some configurations
+// (execute_if carries all EX_UNIT fields; unused units leave their data bits idle).
+lint_off -rule UNUSEDSIGNAL -file "@VORTEX_HOME@/hw/rtl/interfaces/VX_execute_if.sv"

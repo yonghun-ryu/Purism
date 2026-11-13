@@ -66,7 +66,7 @@ extern fpga_result fpgaPropertiesGetLocalMemorySize(const fpga_properties *filte
   __unused (filters);
   if (lms) {
   #if (XLEN == 64)
-    *lms = 0x200000000; // 8 GB
+    *lms = 0x380000000; // 14 GB (Tier-0 single-DDR[0]; was 0x200000000=8GB)
   #else
     *lms = 0x100000000; // 4 GB
   #endif

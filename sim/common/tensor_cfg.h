@@ -19,6 +19,13 @@
 #include <cassert>
 #include <array>
 
+// Per-cycle MAC-array depth (TC_K) override; must match the RTL VX_tcu_pkg.sv
+// TCU_DP. 0 = auto. Kept as a macro so a single -DTCU_DP_OVERRIDE=N flag keeps
+// the SW fragment packing (b_sub_blocks etc.) consistent with the hardware.
+#ifndef TCU_DP_OVERRIDE
+#define TCU_DP_OVERRIDE 0
+#endif
+
 namespace vortex {
 namespace tensor {
 
@@ -105,7 +112,7 @@ template <uint32_t NT,      // number of threads per warp
           typename Ot = fp32, // output type (C,D)
           uint32_t XB = 4,  // vector element type size in bytes
           uint32_t NR = 8,  // registers per fragment
-          uint32_t DP = 0   // Dot-Product Length (0 for auto)
+          uint32_t DP = TCU_DP_OVERRIDE // Dot-Product Length (0 for auto); default from RTL-matching macro
           >
 struct wmma_config_t {
 private:

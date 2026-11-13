@@ -61,6 +61,14 @@ ifneq (,$(findstring -DEXT_TCU_ENABLE, $(CONFIGS)))
 	RTL_PKGS += $(THIRD_PARTY_DIR)/hardfloat/source/recFNToRecFN.v
 endif
 
+# Purism: OCU (operand transformer) and PSSU inside the TCU
+ifneq (,$(findstring -DEXT_PURISM_ENABLE, $(CONFIGS)))
+	RTL_PKGS += $(RTL_DIR)/ocu/VX_ocu_pkg.sv
+	RTL_PKGS += $(RTL_DIR)/ocu/VX_ocu_converters.sv
+	RTL_INCLUDE += -I$(RTL_DIR)/ocu
+	RTL_INCLUDE += -I$(RTL_DIR)/pssu
+endif
+
 RTL_PKGS += $(RTL_DIR)/VX_trace_pkg.sv
 
 SRCS = $(SW_COMMON_DIR)/util.cpp $(SW_COMMON_DIR)/mem.cpp $(SW_COMMON_DIR)/softfloat_ext.cpp $(SW_COMMON_DIR)/rvfloats.cpp $(SW_COMMON_DIR)/dram_sim.cpp

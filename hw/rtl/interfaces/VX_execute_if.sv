@@ -17,7 +17,9 @@ interface VX_execute_if import VX_gpu_pkg::*; #(
     parameter type data_t = logic
 );
     logic  valid;
+    /* verilator lint_off UNUSEDSIGNAL */ // payload bits unused in some CONFIGS (e.g. NT32 FP16 stream)
     data_t data;
+    /* verilator lint_on UNUSEDSIGNAL */
     logic  ready;
 
     modport master (

@@ -562,6 +562,7 @@ module VX_lsu_slice import VX_gpu_pkg::*; #(
         reset_negedge, 1'b0,	4096
     );
 `else
+    `SCOPE_IO_SWITCH (1);
     `SCOPE_IO_UNUSED(0)
 `endif
 `endif

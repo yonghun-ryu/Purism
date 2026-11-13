@@ -23,17 +23,25 @@ package VX_tcu_pkg;
     // Set configuration parameters
     localparam TCU_NT = `NUM_THREADS;
     localparam TCU_NR = 8;
-    localparam TCU_DP = 0;
+`ifndef TCU_DP_OVERRIDE
+    `define TCU_DP_OVERRIDE 0
+`endif
+    localparam TCU_DP = `TCU_DP_OVERRIDE;  // per-cycle MAC-array depth (TC_K); 0=auto. Lower => fewer DSP/LUT, more cycles.
 
     // Supported data types
-    localparam TCU_FP32_ID = 0;
-    localparam TCU_FP16_ID = 1;
-    localparam TCU_BF16_ID = 2;
-    localparam TCU_I32_ID  = 8;
-    localparam TCU_I8_ID   = 9;
-    localparam TCU_U8_ID   = 10;
-    localparam TCU_I4_ID   = 11;
-    localparam TCU_U4_ID   = 12;
+    localparam TCU_FP32_ID     = 0;
+    localparam TCU_FP16_ID     = 1;
+    localparam TCU_BF16_ID     = 2;
+    /* verilator lint_off UNUSEDPARAM */  // FP8 IDs unused when OCU FP8 path is not built
+    localparam TCU_FP8E4M3_ID  = 5;   // FP8 E4M3 (bias=7, used by OCU dequantize)
+    localparam TCU_FP8E5M2_ID  = 6;   // FP8 E5M2 (bias=15, used by OCU dequantize)
+    localparam TCU_FP4E2M1_ID  = 7;   // FP4 E2M1 (bias=1, no Inf/NaN, used by OCU dequantize)
+    /* verilator lint_on UNUSEDPARAM */
+    localparam TCU_I32_ID      = 8;
+    localparam TCU_I8_ID       = 9;
+    localparam TCU_U8_ID       = 10;
+    localparam TCU_I4_ID       = 11;
+    localparam TCU_U4_ID       = 12;
 
     // Tile dimensions
     localparam TCU_TILE_CAP = TCU_NT * TCU_NR;
@@ -87,6 +95,9 @@ package VX_tcu_pkg;
             TCU_FP32_ID: `TRACE(level, ("fp32"))
             TCU_FP16_ID: `TRACE(level, ("fp16"))
             TCU_BF16_ID: `TRACE(level, ("bf16"))
+            TCU_FP8E4M3_ID: `TRACE(level, ("fp8e4m3"))
+            TCU_FP8E5M2_ID: `TRACE(level, ("fp8e5m2"))
+            TCU_FP4E2M1_ID: `TRACE(level, ("fp4e2m1"))
             TCU_I32_ID:  `TRACE(level, ("i32"))
             TCU_I8_ID:   `TRACE(level, ("i8"))
             TCU_U8_ID:   `TRACE(level, ("u8"))
@@ -100,6 +111,7 @@ package VX_tcu_pkg;
                      input [INST_OP_BITS-1:0] op_type,
                      input op_args_t op_args
     );
+`ifdef EXT_TCU_ENABLE
         case (INST_TCU_BITS'(op_type))
             INST_TCU_WMMA: begin
                 `TRACE(level, ("WMMA."));
@@ -108,8 +120,21 @@ package VX_tcu_pkg;
                 trace_fmt(level, op_args.tcu.fmt_d);
                 `TRACE(level, (".%0d.%0d", op_args.tcu.step_m, op_args.tcu.step_n));
             end
+        `ifdef EXT_PURISM_ENABLE
+            INST_TCU_DRAIN: begin
+                `TRACE(level, ("WMMA.DRAIN.b%0d.s%0d.", op_args.tcu.bank, op_args.tcu.two_scale ? 2 : 1));
+                trace_fmt(level, op_args.tcu.fmt_s);
+                `TRACE(level, (".%0d.%0d", op_args.tcu.step_m, op_args.tcu.step_n));
+            end
+            INST_TCU_SETSCALE: `TRACE(level, ("PSSU.SETSCALE.b%0d.%s%0d", op_args.tcu.bank, op_args.tcu.wa ? "a" : "w", op_args.tcu.slot))
+            INST_TCU_READ:     `TRACE(level, ("PSSU.READ.%0d", op_args.tcu.slot))
+            INST_TCU_SETZP:    `TRACE(level, ("OT.SETZP"))
+        `endif
             default: `TRACE(level, ("?"))
         endcase
+`else
+        `TRACE(level, ("?"))
+`endif
     endtask
 `endif
 

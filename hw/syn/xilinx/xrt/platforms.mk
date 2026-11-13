@@ -10,7 +10,7 @@ else ifeq ($(DEV_ARCH), versal)
 # versal
 CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=1 -DPLATFORM_MEMORY_ADDR_WIDTH=32
 ifneq ($(findstring xilinx_vck5000,$(XSA)),)
-	CONFIGS += -DPLATFORM_MEMORY_OFFSET=40'hC000000000
+	CONFIGS += -DPLATFORM_XILINX_VCK5000
 endif
 else
 # alveo
@@ -30,8 +30,13 @@ else ifneq ($(findstring xilinx_u280,$(XSA)),)
   CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=32 -DPLATFORM_MEMORY_ADDR_WIDTH=33
   VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:HBM[0:31]
 else ifneq ($(findstring xilinx_u250,$(XSA)),)
-  # 64 GB of DDR4 with 4 channels (16 GB per channel)
+  # 64 GB of DDR4 with 4 channels (16 GB per channel); bank0 base = 0x4000000000
   CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=4 -DPLATFORM_MEMORY_ADDR_WIDTH=36
+  CONFIGS += -DPLATFORM_XILINX_U250_BANK0
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_0:DDR[0]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_1:DDR[0]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_2:DDR[0]
+  VPP_FLAGS += --connectivity.sp vortex_afu_1.m_axi_mem_3:DDR[0]
 else ifneq ($(findstring xilinx_u200,$(XSA)),)
   # 64 GB of DDR4 with 4 channels (16 GB per channel)
   CONFIGS += -DPLATFORM_MEMORY_NUM_BANKS=4 -DPLATFORM_MEMORY_ADDR_WIDTH=36

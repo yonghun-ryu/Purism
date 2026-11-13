@@ -126,11 +126,12 @@ module VX_stream_arb #(
             wire [NUM_REQS-1:0]     arb_onehot;
             wire                    arb_ready;
 
+            /* verilator lint_off SELRANGE */
             for (genvar r = 0; r < NUM_REQS; ++r) begin : g_requests
                 wire [NUM_OUTPUTS-1:0] requests;
                 for (genvar o = 0; o < NUM_OUTPUTS; ++o) begin : g_o
                     localparam i = r * NUM_OUTPUTS + o;
-                    assign requests[o] = valid_in[i];
+                    assign requests[o] = (i < NUM_INPUTS) ? valid_in[i] : 1'b0;
                 end
                 assign arb_requests[r] = (| requests);
             end
@@ -169,6 +170,7 @@ module VX_stream_arb #(
                 assign valid_out_w[o] = (NUM_OUTPUTS == 1) ? arb_valid : (| (valid_in_w & arb_onehot));
                 assign data_out_w[o]  = data_in_w[arb_index];
             end
+            /* verilator lint_on SELRANGE */
 
             for (genvar i = 0; i < NUM_INPUTS; ++i) begin : g_ready_in
                 localparam o = i % NUM_OUTPUTS;

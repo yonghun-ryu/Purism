@@ -87,12 +87,20 @@ module VX_execute import VX_gpu_pkg::*; #(
 `endif
 
 `ifdef EXT_TCU_ENABLE
+    // fmax lever B: register slice on the base(SLR0)->accel(SLR2/3) dispatch crossing.
+    VX_dispatch_if tcu_dispatch_if[`ISSUE_WIDTH]();
+    VX_dispatch_relay #(.NUM (`ISSUE_WIDTH)) tcu_dispatch_relay (
+        .clk    (clk),
+        .reset  (reset),
+        .in_if  (dispatch_if[EX_TCU * `ISSUE_WIDTH +: `ISSUE_WIDTH]),
+        .out_if (tcu_dispatch_if)
+    );
     VX_tcu_unit #(
         .INSTANCE_ID (`SFORMATF(("%s-tcu", INSTANCE_ID)))
     ) tcu_unit (
         .clk            (clk),
         .reset          (reset),
-        .dispatch_if    (dispatch_if[EX_TCU * `ISSUE_WIDTH +: `ISSUE_WIDTH]),
+        .dispatch_if    (tcu_dispatch_if),
         .commit_if      (commit_if[EX_TCU * `ISSUE_WIDTH +: `ISSUE_WIDTH])
     );
 `endif

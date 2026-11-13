@@ -349,6 +349,17 @@
 `define NUM_OPCS        `UP(`NUM_WARPS / (4 * `ISSUE_WIDTH))
 `endif
 
+// operands->dispatch relay pipeline stages (fmax lever; 0 = passthrough = bit-identical)
+`ifndef OPC_DISPATCH_PIPE
+`define OPC_DISPATCH_PIPE 0
+`endif
+
+// dispatch->accel(TCU) relay stages (fmax lever B; splits the base->accel
+// SLR crossing in 2-SLR NT32; 0 = passthrough = bit-identical)
+`ifndef DISPATCH_ACCEL_PIPE
+`define DISPATCH_ACCEL_PIPE 0
+`endif
+
 // Register File Banks
 `ifndef NUM_GPR_BANKS
 `define NUM_GPR_BANKS   4

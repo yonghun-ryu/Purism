@@ -203,19 +203,27 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 	wire [C_M_AXI_MEM_NUM_BANKS-1:0] m_axi_wr_req_fire, m_axi_wr_rsp_fire;
 	wire [NUM_MEM_BANKS_SIZEW-1:0] cur_wr_reqs, cur_wr_rsps;
 
+	// Count accepted AW handshakes directly as the write-request signal,
+	// mirroring the B-response counting below. AXI4 guarantees exactly
+	// one B response per accepted AW (regardless of W-burst length), so
+	// gating on AW+W-both-fired (the previous VX_axi_write_ack-based
+	// scheme) is unnecessary -- and was actively buggy: aw_fired/w_fired
+	// are single-bit trackers updated in one always block where
+	// `if (aw_fire) aw_fired<=1` and `if (tx_ack) aw_fired<=0` can both
+	// be true in the same cycle (a new AW firing the same cycle an
+	// older pending AW+W pair completes); non-blocking-assignment
+	// last-write-wins semantics let the tx_ack clear silently drop the
+	// new AW's acknowledgment. Its later W then never produces a
+	// tx_ack, so cur_wr_reqs undercounts by one relative to the B
+	// response that does arrive, underflowing the unsigned
+	// vx_pending_writes counter (wraps near 4095) and permanently
+	// blocking ap_done. Reproduced on real U250 hardware: the exact
+	// launch count before hang scaled inversely with AXI write traffic
+	// volume (heavy weight-tensor DMA failed within ~100-120 launches,
+	// light KV-cache traffic survived ~400), consistent with a
+	// traffic-proportional race rather than a fixed launch-count limit.
 	for (genvar i = 0; i < C_M_AXI_MEM_NUM_BANKS; ++i) begin : g_m_axi_wr_req_fire
-		VX_axi_write_ack axi_write_ack (
-            .clk    (clk),
-            .reset  (reset),
-            .awvalid(m_axi_mem_awvalid_a[i]),
-            .awready(m_axi_mem_awready_a[i]),
-            .wvalid (m_axi_mem_wvalid_a[i]),
-            .wready (m_axi_mem_wready_a[i]),
-			.tx_ack (m_axi_wr_req_fire[i]),
-			`UNUSED_PIN (aw_ack),
-			`UNUSED_PIN (w_ack),
-			`UNUSED_PIN (tx_rdy)
-        );
+		assign m_axi_wr_req_fire[i] = m_axi_mem_awvalid_a[i] && m_axi_mem_awready_a[i];
 	end
 
 	for (genvar i = 0; i < C_M_AXI_MEM_NUM_BANKS; ++i) begin : g_m_axi_wr_rsp_fire
@@ -228,8 +236,18 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 	wire signed [NUM_MEM_BANKS_SIZEW:0] reqs_sub = (NUM_MEM_BANKS_SIZEW+1)'(cur_wr_reqs) -
 	                                                     (NUM_MEM_BANKS_SIZEW+1)'(cur_wr_rsps);
 
+	// Cleared on ap_reset too, matching `state`'s reset condition above
+	// (line 142): if ap_reset fires while writes are still draining
+	// (state forced back to STATE_IDLE), any nonzero residual here would
+	// otherwise persist across the reset -- since only the true system
+	// `reset` cleared it before -- permanently blocking ap_done on every
+	// subsequent launch, as nothing decrements a leftover count whose
+	// in-flight B responses were abandoned by the reset. Not on the
+	// critical path for the AW/W race fix above (normal operation never
+	// pulses ap_reset mid-launch), but a real latent gap for any future
+	// use of ap_reset as an error-recovery or periodic-reset mechanism.
 	always @(posedge clk) begin
-		if (reset) begin
+		if (reset || ap_reset) begin
 			vx_pending_writes <= '0;
 		end else begin
 			vx_pending_writes <= vx_pending_writes + PENDING_WR_SIZEW'(reqs_sub);
@@ -360,10 +378,14 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 
 `ifdef SCOPE
 `ifdef DBG_SCOPE_AFU
-	wire m_axi_mem_awfire_0 = m_axi_mem_awvalid_a[0] & m_axi_mem_awready_a[0];
-	wire m_axi_mem_arfire_0 = m_axi_mem_arvalid_a[0] & m_axi_mem_arready_a[0];
-	wire m_axi_mem_wfire_0  = m_axi_mem_wvalid_a[0]  & m_axi_mem_wready_a[0];
-	wire m_axi_mem_bfire_0  = m_axi_mem_bvalid_a[0]  & m_axi_mem_bready_a[0];
+	// Narrowed AP-handshake-only trace (dropped the wide m_axi_mem_* AXI
+	// triggers/probes): those toggle on every DMA beat during normal
+	// weight-upload/kernel traffic and exhaust the fixed-depth trace
+	// buffer within microseconds of boot, long before reaching a hang
+	// that only manifests after ~100+ accumulated vx_start() launches.
+	// This variant only records AP_CTRL/DCR/reset/busy state transitions,
+	// which occur a handful of times per launch, so the buffer can span
+	// hundreds of launches instead of a few AXI bursts.
 	wire reset_negedge;
 	`NEG_EDGE (reset_negedge, reset);
 	`SCOPE_TAP (0, 0, {
@@ -371,38 +393,20 @@ module VX_afu_wrap import VX_gpu_pkg::*; #(
 			ap_start,
 			ap_done,
 			ap_idle,
+			ap_ctrl_read,
+			ap_done_ack,
 			interrupt,
 			vx_reset,
 			vx_busy,
-			state,
-			m_axi_mem_awvalid_a[0],
-			m_axi_mem_awready_a[0],
-			m_axi_mem_wvalid_a[0],
-			m_axi_mem_wready_a[0],
-			m_axi_mem_bvalid_a[0],
-			m_axi_mem_bready_a[0],
-			m_axi_mem_arvalid_a[0],
-			m_axi_mem_arready_a[0],
-			m_axi_mem_rvalid_a[0],
-			m_axi_mem_rready_a[0]
+			state
 		}, {
-			dcr_wr_valid,
-			m_axi_mem_awfire_0,
-			m_axi_mem_arfire_0,
-			m_axi_mem_wfire_0,
-			m_axi_mem_bfire_0
+			dcr_wr_valid
 		}, {
 			dcr_wr_addr,
 			dcr_wr_data,
-			vx_pending_writes,
-			m_axi_mem_awaddr_u[0],
-			m_axi_mem_awid_a[0],
-			m_axi_mem_bid_a[0],
-			m_axi_mem_araddr_u[0],
-			m_axi_mem_arid_a[0],
-			m_axi_mem_rid_a[0]
+			vx_pending_writes
 		},
-		reset_negedge, 1'b0, 4096
+		reset_negedge, 1'b0, 16384
 	);
 `else
     `SCOPE_IO_UNUSED(0)

@@ -35,7 +35,8 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
 
     VX_ibuffer_if ibuffer_if [PER_ISSUE_WARPS]();
     VX_scoreboard_if scoreboard_if();
-    VX_operands_if operands_if();
+    VX_operands_if operands_if();      // operands -> relay (issue_sched tap point)
+    VX_operands_if operands_dsp_if();  // relay -> dispatch
 
     VX_ibuffer #(
         .INSTANCE_ID (`SFORMATF(("%s-ibuffer", INSTANCE_ID))),
@@ -80,6 +81,49 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
         .operands_if    (operands_if)
     );
 
+    // operands -> dispatch relay pipeline (fmax lever, latency-insensitive).
+    // Splits the long operand-collector -> dispatch route into `OPC_DISPATCH_PIPE hops.
+    // 0 = passthrough (bit-identical to no-relay). SIZE=2/OUT_REG=1 registers both
+    // forward data and backward ready (VX_stream_buffer) so neither direction keeps a
+    // long combinational span.
+    localparam OPD_DATAW = $bits(operands_t);
+    localparam OPD_PIPE  = `OPC_DISPATCH_PIPE;
+
+    if (OPD_PIPE == 0) begin : g_opd_passthru
+        assign operands_dsp_if.valid = operands_if.valid;
+        assign operands_dsp_if.data  = operands_if.data;
+        assign operands_if.ready     = operands_dsp_if.ready;
+    end else begin : g_opd_pipe
+        wire [OPD_PIPE:0]            s_valid;
+        wire [OPD_PIPE:0]            s_ready;
+        wire [OPD_DATAW-1:0]         s_data [OPD_PIPE:0];
+
+        assign s_valid[0]        = operands_if.valid;
+        assign s_data[0]         = operands_if.data;
+        assign operands_if.ready = s_ready[0];
+
+        for (genvar i = 0; i < OPD_PIPE; ++i) begin : g_stage
+            VX_elastic_buffer #(
+                .DATAW   (OPD_DATAW),
+                .SIZE    (2),
+                .OUT_REG (1)
+            ) relay (
+                .clk       (clk),
+                .reset     (reset),
+                .valid_in  (s_valid[i]),
+                .ready_in  (s_ready[i]),
+                .data_in   (s_data[i]),
+                .valid_out (s_valid[i+1]),
+                .ready_out (s_ready[i+1]),
+                .data_out  (s_data[i+1])
+            );
+        end
+
+        assign operands_dsp_if.valid = s_valid[OPD_PIPE];
+        assign operands_dsp_if.data  = operands_t'(s_data[OPD_PIPE]);
+        assign s_ready[OPD_PIPE]     = operands_dsp_if.ready;
+    end
+
     VX_dispatch #(
         .INSTANCE_ID (`SFORMATF(("%s-dispatch", INSTANCE_ID))),
         .ISSUE_ID (ISSUE_ID)
@@ -89,11 +133,12 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
     `ifdef PERF_ENABLE
         `UNUSED_PIN     (perf_stalls),
     `endif
-        .operands_if    (operands_if),
+        .operands_if    (operands_dsp_if),
         .dispatch_if    (dispatch_if)
     );
 
-    // notify scheduler
+    // notify scheduler (pre-relay: tap operands_if so in-flight counter has no gap
+    // during relay transit -- avoids a spurious busy de-assert; see plan doc §4-1)
     assign issue_sched_if.valid = operands_if.valid && operands_if.ready && operands_if.data.sop;
     assign issue_sched_if.wis = operands_if.data.wis;
 
@@ -150,6 +195,7 @@ module VX_issue_slice import VX_gpu_pkg::*; #(
         reset_negedge, 1'b0, 4096
     );
 `else
+    `SCOPE_IO_SWITCH (1);
     `SCOPE_IO_UNUSED(0)
 `endif
 `endif

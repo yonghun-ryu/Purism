@@ -101,6 +101,12 @@ ifneq (,$(findstring -DEXT_TCU_ENABLE, $(CONFIGS)))
 	RTL_INCLUDE += -I$(THIRD_PARTY_DIR)/hardfloat/source
 endif
 
+# Purism: OCU (operand transformer) and PSSU inside the TCU
+ifneq (,$(findstring -DEXT_PURISM_ENABLE, $(CONFIGS)))
+	RTL_PKGS += $(RTL_DIR)/ocu/VX_ocu_pkg.sv
+	RTL_INCLUDE += -I$(RTL_DIR)/ocu
+	RTL_INCLUDE += -I$(RTL_DIR)/pssu
+endif
 
 # Kernel compiler global settings
 VPP_FLAGS += --link --target $(TARGET) --platform $(PLATFORM) --save-temps --no_ip_cache
@@ -114,6 +120,29 @@ include $(SRC_DIR)/platforms.mk
 
 VPP_FLAGS += --report_level 2
 VPP_FLAGS += --config $(SRC_DIR)/vitis.ini
+
+ifdef KERNEL_FREQ
+	VPP_FLAGS += --kernel_frequency $(KERNEL_FREQ)
+endif
+
+# optional implementation placer directive (e.g. AltSpreadLogic_medium)
+ifdef PLACE_DIRECTIVE
+	VPP_FLAGS += --vivado.prop run.impl_1.STEPS.PLACE_DESIGN.ARGS.DIRECTIVE=$(PLACE_DIRECTIVE)
+endif
+# optional router directive (e.g. AggressiveExplore)
+ifdef ROUTE_DIRECTIVE
+	VPP_FLAGS += --vivado.prop run.impl_1.STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE=$(ROUTE_DIRECTIVE)
+endif
+# INCR_DCP=<routed dcp of an earlier build>: incremental implementation (reuse its placement/routing
+# for the unchanged cells; for small RTL changes on a congested design)
+ifdef INCR_DCP
+	VPP_FLAGS += --vivado.prop run.impl_1.INCREMENTAL_CHECKPOINT=$(INCR_DCP)
+endif
+# PLACE_NO_BUFG=1: place_design -no_bufg_opt. The placer otherwise promotes ~1k-load
+# nets to BUFG, and in the DFX ULP those global nets fail as None-Partition (18-5241).
+ifeq ($(PLACE_NO_BUFG), 1)
+	VPP_FLAGS += --vivado.prop 'run.impl_1.{STEPS.PLACE_DESIGN.ARGS.MORE OPTIONS}={-no_bufg_opt}'
+endif
 
 # Enable perf counters
 ifdef PERF

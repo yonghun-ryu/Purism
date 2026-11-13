@@ -50,7 +50,7 @@ package VX_gpu_pkg;
 
 	localparam NUM_REGS_BITS = `CLOG2(NUM_REGS);
 
-	localparam DV_STACK_SIZE = `UP(`NUM_THREADS-1);
+	localparam DV_STACK_SIZE = 8; // was UP(NUM_THREADS-1)=3; expf needs depth 5
 	localparam DV_STACK_SIZEW = `UP(`CLOG2(DV_STACK_SIZE));
 
 	localparam PERF_CTR_BITS = 44;
@@ -439,7 +439,12 @@ package VX_gpu_pkg;
 
 `ifdef EXT_TCU_ENABLE
 
-    localparam INST_TCU_WMMA = 4'h0;
+    localparam INST_TCU_WMMA     = 4'h0;
+    // Purism (EXT_PURISM_ENABLE): PSSU on the TCU output path + OCU (operand transformer) before the PEs
+    localparam INST_TCU_DRAIN    = 4'h1;  // WMMA whose last-k results are scaled into the PSSU accumulator
+    localparam INST_TCU_SETSCALE = 4'h2;  // load per-lane scales into a PSSU scale bank
+    localparam INST_TCU_READ     = 4'h3;  // rd <- PSSU accumulator entry, then clear it
+    localparam INST_TCU_SETZP    = 4'h4;  // load per-lane zero points into the OT
     localparam INST_TCU_BITS = 4;
 
 `endif
@@ -532,7 +537,16 @@ package VX_gpu_pkg;
 
 `ifdef EXT_TCU_ENABLE
     typedef struct packed {
-        logic [(INST_ARGS_BITS-16)-1:0] __padding;
+        logic [(INST_ARGS_BITS-34)-1:0] __padding;
+        // Purism fields (zero for plain WMMA)
+        logic [3:0] slot;     // SETSCALE: scale slot (m or n step); READ: accumulator (C register) index
+        logic       wa;       // SETSCALE: 0 = weight scale (per n step), 1 = activation scale (per m step)
+        logic       two_scale;// DRAIN: scale = Sw[n] * Sa[m] (else Sw[n])
+        logic       bank;     // DRAIN / SETSCALE: scale bank
+        logic       last_k;   // uop: last k step of the instruction (drain uops feed the PSSU)
+        logic [3:0] b_idx;    // uop: unpacked B register offset (zero-point slot)
+        logic [3:0] ot_src;   // B source format for the OT (TCU fmt id), 0 = no conversion
+        logic [1:0] step_w;   // packed-B sub-word slice (uops -> OT), 0 for non-packed
         logic [3:0] fmt_d;
         logic [3:0] fmt_s;
         logic [3:0] step_n;

@@ -57,8 +57,20 @@ extern int vx_upload_kernel_bytes(vx_device_h hdevice, const void* content, uint
   auto bin_size = size - 2 * 8;
   auto runtime_size = (max_vma - min_vma);
 
+  // vx_start.S places each hart's TLS block past the image end
+  // (tp = _end + hartid * __tbss_size), outside [min_vma, max_vma). Reserve it
+  // too, or the allocator hands that range to the next buffer and kernel TLS
+  // writes corrupt it (and buffer writes corrupt TLS). __tbss_size is not in
+  // the vxbin header, so reserve a fixed per-hart bound.
+  const uint64_t TLS_BYTES_PER_HART = 512;
+  uint64_t num_cores = 0, num_warps = 0, num_threads = 0;
+  CHECK_ERR(vx_dev_caps(hdevice, VX_CAPS_NUM_CORES, &num_cores), { return err; });
+  CHECK_ERR(vx_dev_caps(hdevice, VX_CAPS_NUM_WARPS, &num_warps), { return err; });
+  CHECK_ERR(vx_dev_caps(hdevice, VX_CAPS_NUM_THREADS, &num_threads), { return err; });
+  auto tls_size = num_cores * num_warps * num_threads * TLS_BYTES_PER_HART;
+
   vx_buffer_h _hbuffer;
-  CHECK_ERR(vx_mem_reserve(hdevice, min_vma, runtime_size, 0, &_hbuffer), {
+  CHECK_ERR(vx_mem_reserve(hdevice, min_vma, runtime_size + tls_size, 0, &_hbuffer), {
     return err;
   });
 
@@ -69,7 +81,7 @@ extern int vx_upload_kernel_bytes(vx_device_h hdevice, const void* content, uint
   });
 
   // mark global variables region as read-write
-  CHECK_ERR(vx_mem_access(_hbuffer, bin_size, runtime_size - bin_size, VX_MEM_READ_WRITE), {
+  CHECK_ERR(vx_mem_access(_hbuffer, bin_size, runtime_size - bin_size + tls_size, VX_MEM_READ_WRITE), {
     vx_mem_free(_hbuffer);
     return err;
   });

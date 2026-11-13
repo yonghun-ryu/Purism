@@ -518,21 +518,68 @@ module VX_decode import VX_gpu_pkg::*; #(
                 `ifdef EXT_TCU_ENABLE
                     7'h02: begin
                         case (funct3)
-                            3'h0: begin // WMMA
+                            3'h0: begin // WMMA (rs1 field = fmt_s, rd field = fmt_d)
                                 ex_type = EX_TCU;
                                 op_type = INST_OP_BITS'(INST_TCU_WMMA);
+                                op_args.tcu = '0;
                                 op_args.tcu.fmt_s  = rs1[3:0];
                                 op_args.tcu.fmt_d  = rd[3:0];
-                                op_args.tcu.step_m = '0;
-                                op_args.tcu.step_n = '0;
+                            `ifdef EXT_PURISM_ENABLE
+                                op_args.tcu.ot_src = rs2[3:0]; // B source format converted by the OT (0 = none)
+                            `endif
                                 `USED_IREG (rd);
                                 `USED_IREG (rs1);
                                 `USED_IREG (rs2);
                                 `USED_IREG (rs3);
                             end
+                        `ifdef EXT_PURISM_ENABLE
+                            3'h1, 3'h2, 3'h3, 3'h4: begin // WMMA.DRAIN {one,two}-scale x bank{0,1}
+                                ex_type = EX_TCU;
+                                op_type = INST_OP_BITS'(INST_TCU_DRAIN);
+                                op_args.tcu = '0;
+                                op_args.tcu.fmt_s     = rs1[3:0];
+                                op_args.tcu.fmt_d     = rd[3:0];
+                                op_args.tcu.ot_src    = rs2[3:0];
+                                op_args.tcu.bank      = ~funct3[0];
+                                op_args.tcu.two_scale = (funct3 >= 3'h3);
+                                `USED_IREG (rd);
+                                `USED_IREG (rs1);
+                                `USED_IREG (rs2);
+                                `USED_IREG (rs3);
+                            end
+                        `endif
                             default:;
                         endcase
                     end
+                `ifdef EXT_PURISM_ENABLE
+                    7'h03: begin
+                        case (funct3)
+                            3'h0: begin // PSSU.SETSCALE: rd field = {bank, wa, slot[2:0]}, rs1 = F-reg scales
+                                ex_type = EX_TCU;
+                                op_type = INST_OP_BITS'(INST_TCU_SETSCALE);
+                                op_args.tcu = '0;
+                                op_args.tcu.bank = rd[4];
+                                op_args.tcu.wa   = rd[3];
+                                op_args.tcu.slot = 4'(rd[2:0]);
+                                `USED_FREG (rs1);
+                            end
+                            3'h1: begin // PSSU.READ: rd = F-reg, rs1 field = accumulator index
+                                ex_type = EX_TCU;
+                                op_type = INST_OP_BITS'(INST_TCU_READ);
+                                op_args.tcu = '0;
+                                op_args.tcu.slot = rs1[3:0];
+                                `USED_FREG (rd);
+                            end
+                            3'h2: begin // OT.SETZP: rs1 = I-reg, per-lane zero points (8 bits per B register)
+                                ex_type = EX_TCU;
+                                op_type = INST_OP_BITS'(INST_TCU_SETZP);
+                                op_args.tcu = '0;
+                                `USED_IREG (rs1);
+                            end
+                            default:;
+                        endcase
+                    end
+                `endif
                 `endif
                     default:;
                 endcase
